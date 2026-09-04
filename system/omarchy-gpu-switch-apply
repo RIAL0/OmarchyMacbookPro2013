@@ -1,0 +1,173 @@
+#!/bin/bash
+#
+# omarchy-gpu-switch-apply — apply the persisted GPU choices on a dual-GPU
+# MacBook Pro with Apple gmux (e.g. MacBookPro10,1).
+#
+# Two things are applied, in order:
+#
+# 1. Next-boot panel owner: Apple's `gpu-power-prefs` EFI variable, from
+#    /etc/omarchy-gpu-mode (integrated | dedicated). The firmware treats the
+#    variable as one-shot: it reads it at power-on, applies it, and deletes
+#    it, so it has to be re-written before every firmware boot.
+#
+# 2. Discrete GPU power: when the Intel iGPU owns the panel, the NVIDIA card
+#    is idle but still fully powered (nouveau has no runtime PM on Macs).
+#    gmux can cut its power rail through vga_switcheroo; policy comes from
+#    /etc/omarchy-gpu-dgpu-power:
+#      auto  (default) power the dGPU off whenever the iGPU drives the panel
+#      on              keep it powered (external outputs are wired to it)
+#    The dGPU is never touched while it drives the panel.
+#
+# Runs:
+#   - at boot, from omarchy-gpu-switch-persist.service (before sddm)
+#   - after resume, from the system-sleep hook (matters for hibernate)
+#   - from `omarchy-gpu-switch ...` via sudo
+#
+# Usage:
+#   omarchy-gpu-switch-apply                        re-apply both
+#   omarchy-gpu-switch-apply integrated|dedicated   save mode, re-apply both
+#   omarchy-gpu-switch-apply dgpu auto|off|on       save dGPU policy, re-apply
+#                                                   ("off" is an alias of auto)
+# Exit: 0 ok, 2 bad argument/config, 3 NVRAM write failed, 4 dGPU power change failed.
+
+set -uo pipefail
+
+MODE_FILE=/etc/omarchy-gpu-mode
+DGPU_FILE=/etc/omarchy-gpu-dgpu-power
+STATE_FILE=/run/omarchy-gpu-dgpu-power         # last applied dGPU state, for the user script
+VAR=/sys/firmware/efi/efivars/gpu-power-prefs-fa4ce28d-b62f-4c99-9cc3-6815686e30f9
+SWITCH=/sys/kernel/debug/vgaswitcheroo/switch
+
+(( EUID == 0 )) || { echo "omarchy-gpu-switch-apply: must run as root" >&2; exit 1; }
+
+log() { echo "$*"; }
+err() { echo "omarchy-gpu-switch-apply: $*" >&2; }
+
+# ---------------------------------------------------------------------------
+# Arguments
+# ---------------------------------------------------------------------------
+case ${1:-} in
+  "") ;;
+  integrated | dedicated)
+    printf '%s\n' "$1" > "$MODE_FILE" ;;
+  dgpu)
+    case ${2:-} in
+      auto | off) printf 'auto\n' > "$DGPU_FILE" ;;
+      on)         printf 'on\n'   > "$DGPU_FILE" ;;
+      *) err "usage: $0 dgpu auto|off|on"; exit 2 ;;
+    esac ;;
+  *) err "unknown argument '$1'"; exit 2 ;;
+esac
+
+# ---------------------------------------------------------------------------
+# 1. gpu-power-prefs for the next boot
+# ---------------------------------------------------------------------------
+apply_nvram() {
+  [[ -r $MODE_FILE ]] || return 0                    # nothing persisted yet
+  [[ -d /sys/firmware/efi/efivars ]] || return 0     # not EFI, nothing to do
+
+  local mode byte
+  mode=$(<"$MODE_FILE")
+  case $mode in
+    integrated) byte=01 ;;
+    dedicated)  byte=00 ;;
+    *) err "bad mode '$mode' in $MODE_FILE"; return 2 ;;
+  esac
+
+  # Data byte 0 of the variable, or empty if it is absent / unreadable.
+  read_byte() { od -An -tx1 -j4 -N1 "$VAR" 2>/dev/null | tr -d ' \n' || true; }
+
+  # Skip the NVRAM write if the variable already holds the right value.
+  [[ $(read_byte) == "$byte" ]] && return 0
+
+  # efivarfs wants one write of <4 attr bytes><data>; attrs 0x07 = NV+BS+RT.
+  chattr -i "$VAR" 2>/dev/null || true
+  if ! printf "\x07\x00\x00\x00\x${byte}\x00\x00\x00" > "$VAR"; then
+    err "write to $VAR failed"
+    return 3
+  fi
+
+  if [[ $(read_byte) == "$byte" ]]; then
+    log "gpu-power-prefs set for next boot: $mode"
+  elif [[ -e $VAR ]]; then
+    # Apple quirk: after the firmware has consumed gpu-power-prefs at power-on,
+    # a re-created variable is accepted by SetVariable but GetVariable returns
+    # EFI_INVALID_PARAMETER until the next boot. The write itself succeeded
+    # and is honored (verified 2026-09-04).
+    log "gpu-power-prefs written for next boot: $mode (firmware refuses read-back this session)"
+  else
+    err "$VAR vanished after write"
+    return 3
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# 2. Discrete GPU power via gmux / vga_switcheroo
+# ---------------------------------------------------------------------------
+# $SWITCH looks like:
+#   0:IGD:+:Pwr:0000:00:02.0        '+' marks the client that owns the panel
+#   1:DIS: :Pwr:0000:01:00.0        Pwr | Off
+#   2:DIS-Audio: :Pwr:0000:01:00.1
+apply_dgpu() {
+  local policy=auto
+  [[ -r $DGPU_FILE ]] && policy=$(<"$DGPU_FILE")
+  case $policy in
+    auto | on) ;;
+    *) err "bad policy '$policy' in $DGPU_FILE (auto|on)"; return 2 ;;
+  esac
+
+  if ! mountpoint -q /sys/kernel/debug; then
+    mount -t debugfs debugfs /sys/kernel/debug 2>/dev/null \
+      || { err "debugfs not mounted; cannot control dGPU power"; return 0; }
+  fi
+
+  # nouveau is loaded from the initramfs, but give vga_switcheroo a moment
+  # in case the client registers late.
+  local i state=""
+  for i in 1 2 3 4 5; do
+    [[ -r $SWITCH ]] && state=$(<"$SWITCH") && grep -q '^[0-9]*:DIS:' <<<"$state" && break
+    sleep 1
+  done
+  if ! grep -q '^[0-9]*:DIS:' <<<"$state"; then
+    log "vga_switcheroo has no discrete GPU client; leaving dGPU power alone"
+    return 0
+  fi
+
+  local active dis_pwr
+  active=$(awk -F: '$3=="+"{print $2}' <<<"$state")
+  dis_pwr=$(awk -F: '$2=="DIS"{print $4}' <<<"$state")
+
+  if [[ $active != IGD ]]; then
+    log "dGPU drives the panel; leaving it powered"
+    printf 'on\n' > "$STATE_FILE"
+    return 0
+  fi
+
+  local want cmd
+  case $policy in
+    auto) want=Off; cmd=OFF ;;
+    on)   want=Pwr; cmd=ON  ;;
+  esac
+
+  if [[ $dis_pwr == "$want" ]]; then
+    log "dGPU already $( [[ $want == Off ]] && echo 'powered off' || echo powered ) (policy $policy)"
+  else
+    if ! echo "$cmd" > "$SWITCH"; then
+      err "vga_switcheroo refused '$cmd'"
+      return 4
+    fi
+    dis_pwr=$(awk -F: '$2=="DIS"{print $4}' <"$SWITCH")
+    if [[ $dis_pwr != "$want" ]]; then
+      err "dGPU state is '$dis_pwr' after '$cmd', expected '$want'"
+      return 4
+    fi
+    log "dGPU $( [[ $want == Off ]] && echo 'powered off via gmux' || echo 'powered on via gmux' ) (policy $policy)"
+  fi
+  [[ $want == Off ]] && printf 'off\n' > "$STATE_FILE" || printf 'on\n' > "$STATE_FILE"
+  return 0
+}
+
+apply_nvram; rc1=$?
+apply_dgpu;  rc2=$?
+(( rc1 )) && exit "$rc1"
+exit "$rc2"

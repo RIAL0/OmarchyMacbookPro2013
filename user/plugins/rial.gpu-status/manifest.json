@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "id": "rial.gpu-status",
+  "name": "GPU Status",
+  "version": "2.0.0",
+  "author": "rial",
+  "description": "Shows which GPU drives the built-in display on a dual-GPU MacBook Pro (Apple gmux) and lets you switch for the next boot",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "GpuStatus.qml"
+  },
+  "barWidget": {
+    "displayName": "GPU Status",
+    "description": "iGPU / dGPU indicator — click to switch (reboot required)",
+    "category": "System",
+    "allowMultiple": false
+  }
+}

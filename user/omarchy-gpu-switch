@@ -1,0 +1,277 @@
+#!/bin/bash
+#
+# omarchy-gpu-switch — choose which GPU drives the built-in display on a
+# dual-GPU MacBook Pro (Apple gmux), e.g. MacBookPro10,1 (HD 4000 + GT 650M).
+#
+# Apple's firmware decides at power-on whether the Intel iGPU or the NVIDIA
+# dGPU owns the panel, based on the NVRAM variable `gpu-power-prefs`.
+# This script sets that variable (the same thing 0xbb/gpu-switch does), so a
+# reboot is required for the change to take effect. supergfxd / prime style
+# tools do not work on this hardware — they cannot see through gmux.
+#
+# The firmware is one-shot: it deletes gpu-power-prefs after honoring it. The
+# chosen mode therefore lives in /etc/omarchy-gpu-mode and is re-written to
+# NVRAM by /usr/local/lib/omarchy-gpu-switch-apply at every boot
+# (omarchy-gpu-switch-persist.service) and after hibernate resume.
+#
+# Usage:
+#   omarchy-gpu-switch                 interactive: show state, offer to switch + reboot
+#   omarchy-gpu-switch status          human-readable state
+#   omarchy-gpu-switch status --widget machine-readable "key|label|tooltip" for the bar
+#   omarchy-gpu-switch integrated      use Intel iGPU on next boot
+#   omarchy-gpu-switch dedicated       use NVIDIA dGPU on next boot
+#   ... add --no-reboot to skip the reboot prompt.
+#   omarchy-gpu-switch dgpu off        power the idle NVIDIA card off via gmux
+#                                      whenever the iGPU drives the panel (default)
+#   omarchy-gpu-switch dgpu on         keep it powered (needed for HDMI/DP outputs,
+#                                      which are wired to the NVIDIA card only)
+#
+# While the iGPU drives the panel the dGPU is idle but, by default on Linux,
+# still fully powered. The helper cuts its power rail through gmux
+# (vga_switcheroo) at boot, after resume, and on `dgpu off`; the policy lives
+# in /etc/omarchy-gpu-dgpu-power (auto | on).
+#
+# Recovery: if a boot ever ends on a black screen, reset NVRAM by holding
+# Cmd+Option+P+R at power-on. That clears gpu-power-prefs and the firmware
+# falls back to the dedicated GPU.
+
+set -euo pipefail
+
+EFIVARS=/sys/firmware/efi/efivars
+PREF_VAR="$EFIVARS/gpu-power-prefs-fa4ce28d-b62f-4c99-9cc3-6815686e30f9"
+MODE_FILE=/etc/omarchy-gpu-mode
+DGPU_FILE=/etc/omarchy-gpu-dgpu-power
+APPLY=/usr/local/lib/omarchy-gpu-switch-apply
+
+die() { echo "omarchy-gpu-switch: $*" >&2; exit 1; }
+
+# ---------------------------------------------------------------------------
+# State detection
+# ---------------------------------------------------------------------------
+
+# Which GPU currently owns the connected built-in panel (eDP)?
+# Prints: integrated | dedicated | unknown
+panel_gpu() {
+  local c pci vendor
+  for c in /sys/class/drm/card*-eDP-*; do
+    [[ -r $c/status && $(<"$c/status") == connected ]] || continue
+    pci=$(readlink -f "$c/device/device")
+    vendor=$(<"$pci/vendor")
+    case "$vendor" in
+      0x8086) echo integrated; return ;;
+      0x10de | 0x1002) echo dedicated; return ;;
+    esac
+  done
+  echo unknown
+}
+
+# Which GPU will the next boot use?
+# Prints: integrated | dedicated
+# The persisted mode file is authoritative (the firmware erases the NVRAM
+# variable after each boot). Without it, fall back to the variable itself;
+# absent variable = firmware default = dedicated.
+next_boot_gpu() {
+  if [[ -r $MODE_FILE ]]; then
+    case $(<"$MODE_FILE") in
+      integrated) echo integrated; return ;;
+      dedicated)  echo dedicated;  return ;;
+    esac
+  fi
+  if [[ -r $PREF_VAR ]]; then
+    # 4 bytes of attributes, then 4 bytes of data; data byte 0 is the mode.
+    local byte
+    byte=$(od -An -tx1 -j4 -N1 "$PREF_VAR" 2>/dev/null | tr -d ' \n')
+    [[ $byte == 01 ]] && { echo integrated; return; }
+  fi
+  echo dedicated
+}
+
+# Power state of the NVIDIA card: on | off | none
+# After a gmux power-off (vga_switcheroo OFF) nouveau leaves the PCI device
+# in D3hot; while driving or idle-but-powered it is D0. Runtime PM is not
+# used on this hardware, so power/runtime_status is not informative.
+dgpu_power() {
+  local d
+  for d in /sys/bus/pci/devices/*; do
+    [[ $(<"$d/vendor") == 0x10de && $(<"$d/class") == 0x03* ]] || continue
+    case $(cat "$d/power_state" 2>/dev/null) in
+      D0)      echo on ;;
+      D3*)     echo off ;;
+      *)       echo unknown ;;
+    esac
+    return
+  done
+  echo none
+}
+
+# Persisted dGPU power policy: auto (off when idle) | on
+dgpu_policy() {
+  local p=auto
+  [[ -r $DGPU_FILE ]] && p=$(<"$DGPU_FILE")
+  echo "$p"
+}
+
+pretty_dgpu() {
+  local now="$1" pol="$2"
+  case "$now" in
+    on)   [[ $pol == on ]] && echo "powered (kept on)" || echo "powered" ;;
+    off)  echo "powered off (gmux)" ;;
+    none) echo "not present" ;;
+    *)    echo "unknown" ;;
+  esac
+}
+
+pretty() {
+  case "$1" in
+    integrated) echo "Integrated (Intel iGPU)" ;;
+    dedicated)  echo "Dedicated (NVIDIA dGPU)" ;;
+    *)          echo "Unknown" ;;
+  esac
+}
+
+print_status() {
+  local now next
+  now=$(panel_gpu); next=$(next_boot_gpu)
+
+  if [[ ${1:-} == --widget ]]; then
+    local key label tip
+    case "$now" in
+      integrated) key=integrated; label="iGPU" ;;
+      dedicated)  key=dedicated;  label="dGPU" ;;
+      *)          key=unknown;    label="GPU"  ;;
+    esac
+    tip="Display on: $(pretty "$now")"
+    [[ $now == integrated ]] && tip+=$'\n'"NVIDIA: $(pretty_dgpu "$(dgpu_power)" "$(dgpu_policy)")"
+    if [[ $next != "$now" && $now != unknown ]]; then
+      key="pending"
+      tip+=$'\n'"Next boot: $(pretty "$next") — reboot to apply"
+    else
+      tip+=$'\n'"Next boot: $(pretty "$next")"
+    fi
+    tip+=$'\n'"Click to switch"
+    printf '%s|%s|%s\n' "$key" "$label" "$tip"
+    return
+  fi
+
+  echo "Display currently driven by : $(pretty "$now")"
+  echo "GPU selected for next boot  : $(pretty "$next")"
+  [[ $now == integrated ]] && echo "NVIDIA dGPU power           : $(pretty_dgpu "$(dgpu_power)" "$(dgpu_policy)")"
+  if [[ $next != "$now" && $now != unknown ]]; then
+    echo
+    echo "A switch is pending — reboot to apply."
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Setting the preference
+# ---------------------------------------------------------------------------
+
+check_supported() {
+  [[ -d /sys/firmware/efi ]] || die "not booted in EFI mode"
+  mountpoint -q "$EFIVARS" || die "efivarfs is not mounted at $EFIVARS"
+  grep -qi '^MacBook' /sys/class/dmi/id/product_name 2>/dev/null \
+    || die "this only works on dual-GPU MacBook Pros (Apple gmux)"
+}
+
+set_pref() {  # integrated | dedicated
+  case "$1" in
+    integrated | dedicated) ;;
+    *) die "unknown mode: $1" ;;
+  esac
+  [[ -x $APPLY ]] || die "$APPLY is missing — the persistence helper is not installed"
+
+  # The root helper saves the mode to $MODE_FILE and writes gpu-power-prefs.
+  if (( EUID == 0 )); then
+    "$APPLY" "$1"
+  else
+    sudo "$APPLY" "$1"
+  fi
+
+  [[ $(next_boot_gpu) == "$1" ]] || die "failed to persist mode in $MODE_FILE"
+  echo "Next boot will use: $(pretty "$1")"
+}
+
+set_dgpu() {  # on | off
+  case "$1" in
+    on | off) ;;
+    *) die "usage: omarchy-gpu-switch dgpu on|off" ;;
+  esac
+  [[ -x $APPLY ]] || die "$APPLY is missing — the persistence helper is not installed"
+  if (( EUID == 0 )); then
+    "$APPLY" dgpu "$1"
+  else
+    sudo "$APPLY" dgpu "$1"
+  fi
+  echo "NVIDIA dGPU power           : $(pretty_dgpu "$(dgpu_power)" "$(dgpu_policy)")"
+}
+
+maybe_reboot() {
+  [[ ${NO_REBOOT:-0} == 1 ]] && return
+  [[ -t 0 ]] || return
+  if command -v gum >/dev/null && gum confirm "Reboot now to apply?"; then
+    if command -v omarchy-system-reboot >/dev/null; then
+      omarchy-system-reboot
+    else
+      systemctl reboot
+    fi
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+NO_REBOOT=0
+args=()
+for a in "$@"; do
+  case "$a" in
+    --no-reboot) NO_REBOOT=1 ;;
+    *) args+=("$a") ;;
+  esac
+done
+set -- "${args[@]:-}"
+
+case "${1:-toggle}" in
+  status)
+    print_status "${2:-}"
+    ;;
+  integrated | dedicated)
+    check_supported
+    set_pref "$1"
+    maybe_reboot
+    ;;
+  dgpu)
+    check_supported
+    set_dgpu "${2:-}"
+    ;;
+  toggle | "")
+    check_supported
+    print_status
+    echo
+    now=$(panel_gpu)
+    case "$now" in
+      integrated) target=dedicated ;;
+      dedicated)  target=integrated ;;
+      *) die "cannot tell which GPU owns the display" ;;
+    esac
+    if [[ $(next_boot_gpu) == "$target" ]]; then
+      echo "Already set to switch to $(pretty "$target") on next boot."
+      maybe_reboot
+      exit 0
+    fi
+    if command -v gum >/dev/null; then
+      gum confirm "Switch to $(pretty "$target") and reboot?" || exit 130
+    else
+      read -rp "Switch to $(pretty "$target") and reboot? [y/N] " ans
+      [[ $ans == [yY]* ]] || exit 130
+    fi
+    set_pref "$target"
+    maybe_reboot
+    ;;
+  -h | --help | help)
+    sed -n '2,/^$/p' "$0" | sed 's/^# \{0,1\}//'
+    ;;
+  *)
+    die "unknown command: $1 (try --help)"
+    ;;
+esac

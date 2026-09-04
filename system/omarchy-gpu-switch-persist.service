@@ -1,0 +1,16 @@
+[Unit]
+Description=Apply GPU choice (gpu-power-prefs) and dGPU power for Apple gmux
+Documentation=file:/usr/local/lib/omarchy-gpu-switch-apply
+ConditionPathExists=/etc/omarchy-gpu-mode
+ConditionPathIsMountPoint=/sys/firmware/efi/efivars
+After=local-fs.target sys-kernel-debug.mount
+# Power the idle dGPU off before any compositor enumerates /dev/dri.
+Before=display-manager.service sddm.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/lib/omarchy-gpu-switch-apply
+
+[Install]
+WantedBy=multi-user.target
