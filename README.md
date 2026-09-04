@@ -138,9 +138,14 @@ card only. With the card powered off they are dead. Run `omarchy-gpu-switch dgpu
 plugging in, and `dgpu off` again afterwards, or the card stays powered on every boot.
 Driving an external display from the Intel side has not been tested on this setup.
 
-**Suspend and hibernate.** Plain suspend needs nothing; gmux restores the powered-off state
-itself. Hibernate goes through the firmware like a cold boot, which powers the card back on and
-consumes the NVRAM variable; the sleep hook re-applies both on resume.
+**Suspend and hibernate.** Hibernate goes through the firmware like a cold boot, which powers the
+card back on and consumes the NVRAM variable; the sleep hook re-applies both correctly on resume.
+**Plain suspend (lid close) is a known gap:** the dGPU can come back fully powered after resume
+even though it was off before suspend, because the kernel's own PCI resume path restores it
+independently of `vga_switcheroo`'s bookkeeping. There is no fix yet — see
+[docs/troubleshooting.md](docs/troubleshooting.md#dgpu-comes-back-powered-on-after-a-plain-suspend-lid-close-not-just-hibernate)
+for what was tried, including a real kernel crash to avoid repeating. Reboot after suspending
+if you care about the battery savings.
 
 ## If something goes wrong
 

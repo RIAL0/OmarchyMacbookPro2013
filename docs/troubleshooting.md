@@ -59,6 +59,40 @@ normal; anything after that failing on card1 is the actual problem.
 - After a hibernate resume the sleep hook should have re-applied it:
   `journalctl -b | grep omarchy-gpu-switch-apply`.
 
+## dGPU comes back powered on after a plain suspend (lid close), not just hibernate
+
+**Known limitation, no fix yet.** Confirmed 2026-09-04: after a deep suspend (`PM: suspend entry
+(deep)` in `journalctl -k`, the normal mode on this hardware) and resume, the kernel's own PCI
+resume path restores the NVIDIA card to full power (`power_state` back to `D0`) regardless of
+what `vga_switcheroo` had set before suspend. The sleep hook does run on resume
+(`journalctl -b | grep omarchy-gpu-switch-apply` shows it), but it decides whether to reapply
+"off" by reading `vga_switcheroo`'s own bookkeeping (`/sys/kernel/debug/vgaswitcheroo/switch`),
+and that file can still say `Off` even though the real power state came back to `D0`. Seeing
+"already off," the hook does nothing, and the card silently stays powered for the rest of the
+session — this defeats the whole point of the dGPU power-off for anyone who suspends instead of
+shutting down.
+
+**Do not try to fix this by hand with `echo ON > .../vgaswitcheroo/switch`.** On this
+GK107/nouveau combination, forcing that toggle to test a resync crashed the `nouveau` kernel
+module — around three dozen fault traces (`nvkm_object_fini`, `g84_bar_flush`,
+`gt215_pmu_init`, `nv50_runl_wait`, `gf119_disp_core_init`/`fini`) as it tried and failed to
+reinitialize the GPU's internal engines. The rest of the system stayed up (Hyprland runs
+entirely on the Intel side and was unaffected, no kernel panic, no failed systemd units), but the
+NVIDIA card was left in an unreliable driver state until reboot. Re-issuing plain `OFF` when the
+switcheroo file already says `Off` is a safe no-op, but it also does nothing — it does not
+re-check or re-apply against the real PCI power state, so it can't fix the desync either.
+
+**Current workaround: reboot.** A cold boot reliably re-establishes the dGPU-off state through
+the normal persist-service path (proven across every boot this project has tested). If you
+suspend often and care about the battery savings, expect to need a reboot afterward until this
+gets a real fix — hibernate is unaffected by this specific issue (it already goes through a full
+firmware boot, which the persist service already handles correctly).
+
+If you want to help find a real fix: the open question is whether there's a safe way to force
+`vga_switcheroo` to resync its bookkeeping with the actual PCI power state without triggering a
+full nouveau engine reinit — for example, unloading and reloading the `nouveau` module after
+resume, untested and unverified as of this writing. PRs and reports welcome.
+
 ## External display shows nothing
 
 The HDMI and DisplayPort connectors are on the NVIDIA card. Run `omarchy-gpu-switch dgpu on`,
