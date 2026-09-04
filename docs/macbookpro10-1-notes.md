@@ -56,18 +56,19 @@ loaded anyway, and the gmux power-off needs it registered with vga_switcheroo.
 
 ## Battery, before and after
 
-Rough numbers from a 60-second battery logger (whole-percent resolution) on 2026-09-04, active
-desktop with a terminal session, 109 Wh pack as reported by upower:
+Numbers from a 60-second battery logger (whole-percent resolution) on 2026-09-04, active desktop
+with a terminal session, 109 Wh pack as reported by upower:
 
-| State | Drain |
-|---|---|
-| NVIDIA driving the panel | about 24 %/h, about 26 W |
-| Intel driving the panel, NVIDIA idle at D0 | about 22 %/h, about 24 W |
-| Intel driving the panel, NVIDIA powered off via gmux | about 20 %/h, about 21 W |
+| State | Window | Drain |
+|---|---|---|
+| NVIDIA driving the panel | 30 min, single boot | 24.0 %/h, about 26 W |
+| Intel driving the panel, NVIDIA powered off via gmux | 35 min, single boot | 18.9 %/h, about 20.5 W |
 
-The last two windows were short (under ten minutes), so treat the differences as indicative.
-An idle GT 650M at D0 is typically 4 to 6 W, which matches. Quiet moments on the Intel-only
-configuration read around 16 W.
+Both windows are continuous single-boot runs long enough to be trustworthy to within about
+1 %/h. The gap, roughly 5 %/h or 5.5 W, matches what an idle GT 650M typically costs sitting
+fully powered (D0) instead of cut off at the gmux rail. An earlier short (9-minute) sample with
+the card left powered but idle at D0 read about 22.5 %/h, consistent with the card's power draw
+sitting between the two states above.
 
 ## Things that do not work
 
