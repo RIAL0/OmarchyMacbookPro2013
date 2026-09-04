@@ -46,7 +46,26 @@ The widget in the top bar, and what its tooltip shows on hover:
   <img src="docs/img/bar-widget-tooltip.png" alt="Tooltip: Display on Integrated, NVIDIA powered off, next boot Integrated" width="380">
 </p>
 
+## Quick install
+
+On a fresh Omarchy install, one command clones the repo and runs the installer:
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/RIAL0/OmarchyMacbookPro2013/main/bootstrap.sh)
+```
+
+Read what that actually does before running it on a machine you care about: it clones this repo
+to `~/.local/share/OmarchyMacbookPro2013` (or pulls the latest if it's already there) and runs
+`install.sh` from it, which needs `sudo`. Use `bash <( ... )` exactly as shown, not
+`curl ... | bash` — a plain pipe hands bash's input to `curl`, which breaks the `sudo` password
+prompt. Re-run the same command any time to update. Skip to
+[step 5](#install-step-by-step) below to verify it worked, then jump to
+[Daily use](#daily-use).
+
 ## Install, step by step
+
+Prefer to see each step, or already have the repo cloned another way, follow this instead of
+Quick install above.
 
 1. Install Omarchy normally. The stock kernel already has everything needed (`i915`, `nouveau`,
    `apple_gmux`, `vga_switcheroo`). No extra packages.
@@ -144,6 +163,7 @@ returns to the firmware default (NVIDIA).
 ## Repository layout
 
 ```
+bootstrap.sh          one-command clone + install, see Quick install above
 install.sh / uninstall.sh
 system/    omarchy-gpu-switch-apply, the systemd unit, the sleep hook
 user/      omarchy-gpu-switch CLI, the bar widget plugin
