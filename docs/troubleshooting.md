@@ -58,40 +58,56 @@ normal; anything after that failing on card1 is the actual problem.
   `1:DIS: :Off:0000:01:00.0` is what you want.
 - After a hibernate resume the sleep hook should have re-applied it:
   `journalctl -b | grep omarchy-gpu-switch-apply`.
+- `od -An -tx1 -N4 /sys/bus/pci/devices/0000:01:00.0/config` printing `ff ff ff ff` means the
+  rail really is cut, whatever `power_state` says. See the next section.
 
-## dGPU comes back powered on after a plain suspend (lid close), not just hibernate
+## "dGPU power" says "powered" after a plain suspend (lid close)
 
-**Known limitation, no fix yet.** Confirmed 2026-09-04: after a deep suspend (`PM: suspend entry
-(deep)` in `journalctl -k`, the normal mode on this hardware) and resume, the kernel's own PCI
-resume path restores the NVIDIA card to full power (`power_state` back to `D0`) regardless of
-what `vga_switcheroo` had set before suspend. The sleep hook does run on resume
-(`journalctl -b | grep omarchy-gpu-switch-apply` shows it), but it decides whether to reapply
-"off" by reading `vga_switcheroo`'s own bookkeeping (`/sys/kernel/debug/vgaswitcheroo/switch`),
-and that file can still say `Off` even though the real power state came back to `D0`. Seeing
-"already off," the hook does nothing, and the card silently stays powered for the rest of the
-session — this defeats the whole point of the dGPU power-off for anyone who suspends instead of
-shutting down.
+**Fixed in the status script on 2026-09-04; the card was never actually on.** If your copy of
+`omarchy-gpu-switch` predates that, update it (re-run the installer). What really happens on a
+deep suspend (`PM: suspend entry (deep)` in `journalctl -k`, the normal mode on this hardware):
 
-**Do not try to fix this by hand with `echo ON > .../vgaswitcheroo/switch`.** On this
-GK107/nouveau combination, forcing that toggle to test a resync crashed the `nouveau` kernel
-module — around three dozen fault traces (`nvkm_object_fini`, `g84_bar_flush`,
-`gt215_pmu_init`, `nv50_runl_wait`, `gf119_disp_core_init`/`fini`) as it tried and failed to
-reinitialize the GPU's internal engines. The rest of the system stayed up (Hyprland runs
-entirely on the Intel side and was unaffected, no kernel panic, no failed systemd units), but the
-NVIDIA card was left in an unreliable driver state until reboot. Re-issuing plain `OFF` when the
-switcheroo file already says `Off` is a safe no-op, but it also does nothing — it does not
-re-check or re-apply against the real PCI power state, so it can't fix the desync either.
+1. The firmware wakes the machine with the NVIDIA card powered.
+2. Early in resume the kernel's PCI core finds the card responding, marks it `D0` and restores
+   its saved PCI config. That `D0` is what `/sys/bus/pci/devices/0000:01:00.0/power_state` shows
+   from then on.
+3. Later in the same resume `apple_gmux` cuts the card's power rail again (its resume handler
+   re-applies `OFF` whenever the card was off before suspend). Nothing updates `power_state`.
 
-**Current workaround: reboot.** A cold boot reliably re-establishes the dGPU-off state through
-the normal persist-service path (proven across every boot this project has tested). If you
-suspend often and care about the battery savings, expect to need a reboot afterward until this
-gets a real fix — hibernate is unaffected by this specific issue (it already goes through a full
-firmware boot, which the persist service already handles correctly).
+So `vga_switcheroo`'s `Off`, the sleep hook's "dGPU already powered off", and the battery drain
+were all right; only `power_state` was stale, and the old status script trusted it. The status
+script now reads the PCI config space instead: with the rail cut every read returns `0xff`.
+Check it by hand, no root needed:
 
-If you want to help find a real fix: the open question is whether there's a safe way to force
-`vga_switcheroo` to resync its bookkeeping with the actual PCI power state without triggering a
-full nouveau engine reinit — for example, unloading and reloading the `nouveau` module after
-resume, untested and unverified as of this writing. PRs and reports welcome.
+```
+od -An -tx1 -N4 /sys/bus/pci/devices/0000:01:00.0/config
+```
+
+`ff ff ff ff` means the card is off. Verified 2026-09-04 23:25 after a lid cycle: config space
+all `ff`, `power_state` `D0`, switcheroo `Off`, battery draw unchanged. The NVRAM variable is
+consumed on a plain suspend too (`efivarfs: removing variable gpu-power-prefs-...` at resume),
+and the sleep hook re-writes it; check `journalctl -b | grep gpu-power-prefs`.
+
+**The real limitation: `dgpu on` does not work after a suspend until you reboot.** Step 2 above
+consumes nouveau's saved PCI state. When `ON` later re-powers the rail the card comes up with
+blank BARs, nouveau has nothing to restore, and its first register access times out. Observed
+on this GK107: about three dozen fault traces in six seconds (`g84_bar_flush` timeout, then
+`nvkm_object_fini`, `gt215_pmu_init`, `nv50_runl_wait`, `gf119_disp_core_init`/`fini`), the
+process that wrote `ON` killed with SIGKILL, and the desktop unaffected because Hyprland runs
+entirely on the Intel side. The card is then in an unreliable driver state, and **the next
+reboot ends on a kernel panic screen** (`Attempted to kill init! exitcode=0x00000009`: the same
+oops fires inside PID 1 while it tears down devices for the reboot). Hold the power button; the
+following boot is clean. This is a kernel-side quirk, not fixable from the scripts here.
+
+So: if you need HDMI or DisplayPort and the machine has been suspended since boot, reboot first,
+then `omarchy-gpu-switch dgpu on`. Do not write `ON` to `/sys/kernel/debug/vgaswitcheroo/switch`
+by hand after a suspend. Re-issuing plain `OFF` when the switcheroo file already says `Off` is a
+harmless no-op.
+
+Untested idea for a real fix: a `pre` sleep hook that switches the card `ON` before suspend (from
+a consistent off state nouveau's saved PCI state is intact, so the normal resume path works),
+lets nouveau suspend and resume it itself, and switches it `OFF` again on `post`. Costs a second
+or two of wake time and a powered card during suspend entry. PRs and reports welcome.
 
 ## External display shows nothing
 

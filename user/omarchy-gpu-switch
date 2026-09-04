@@ -87,13 +87,24 @@ next_boot_gpu() {
 }
 
 # Power state of the NVIDIA card: on | off | none
-# After a gmux power-off (vga_switcheroo OFF) nouveau leaves the PCI device
-# in D3hot; while driving or idle-but-powered it is D0. Runtime PM is not
-# used on this hardware, so power/runtime_status is not informative.
+# Ground truth is the PCI config space: once gmux has cut the card's power
+# rail (vga_switcheroo OFF) every config-space read returns 0xff, so the
+# vendor ID reads ffff. The kernel's power_state file is only bookkeeping
+# and goes stale after a plain suspend: early in resume the PCI core finds
+# the card powered by the firmware and marks it D0, later in resume
+# apple_gmux cuts the rail again, and nothing updates power_state. Reading
+# power_state alone therefore reports "powered" after every lid-close even
+# though the card is off. Runtime PM is not used on this hardware, so
+# power/runtime_status is not informative either.
 dgpu_power() {
-  local d
+  local d vendor
   for d in /sys/bus/pci/devices/*; do
     [[ $(<"$d/vendor") == 0x10de && $(<"$d/class") == 0x03* ]] || continue
+    vendor=$(od -An -tx1 -N2 "$d/config" 2>/dev/null | tr -d ' \n')
+    if [[ $vendor == ffff ]]; then
+      echo off
+      return
+    fi
     case $(cat "$d/power_state" 2>/dev/null) in
       D0)      echo on ;;
       D3*)     echo off ;;

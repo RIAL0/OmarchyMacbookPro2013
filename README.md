@@ -138,14 +138,14 @@ card only. With the card powered off they are dead. Run `omarchy-gpu-switch dgpu
 plugging in, and `dgpu off` again afterwards, or the card stays powered on every boot.
 Driving an external display from the Intel side has not been tested on this setup.
 
-**Suspend and hibernate.** Hibernate goes through the firmware like a cold boot, which powers the
-card back on and consumes the NVRAM variable; the sleep hook re-applies both correctly on resume.
-**Plain suspend (lid close) is a known gap:** the dGPU can come back fully powered after resume
-even though it was off before suspend, because the kernel's own PCI resume path restores it
-independently of `vga_switcheroo`'s bookkeeping. There is no fix yet — see
-[docs/troubleshooting.md](docs/troubleshooting.md#dgpu-comes-back-powered-on-after-a-plain-suspend-lid-close-not-just-hibernate)
-for what was tried, including a real kernel crash to avoid repeating. Reboot after suspending
-if you care about the battery savings.
+**Suspend and hibernate.** Both are handled. Hibernate goes through the firmware like a cold
+boot, which powers the card back on and consumes the NVRAM variable; the sleep hook re-applies
+both on resume. A plain suspend (lid close) also consumes the variable, which the hook re-writes,
+and `apple_gmux` itself cuts the card's power again on resume. One limitation: after a suspend,
+`dgpu on` crashes nouveau until you reboot, so reboot first if you need an external display. The
+kernel's `power_state` file wrongly reports the card as powered after a suspend; the status
+script reads the PCI config space instead. Details in
+[docs/troubleshooting.md](docs/troubleshooting.md#dgpu-power-says-powered-after-a-plain-suspend-lid-close).
 
 ## If something goes wrong
 

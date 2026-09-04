@@ -108,5 +108,7 @@ either GPU and mean nothing.
   `blacklist nouveau` in `/etc/modprobe.d/supergfxd.conf` (nouveau is force-loaded by the
   mkinitcpio `kms` hook anyway). Uninstall it and remove that file.
 - **`nouveau.runpm`, PCI runtime PM**: not wired up on Macs. `power/runtime_status` says nothing
-  useful; read `power_state` instead.
+  useful. `power_state` is right after a boot but goes stale after a plain suspend (the PCI core
+  marks the card D0 before apple_gmux cuts the rail again); the reliable check is the PCI config
+  space, all `0xff` when the rail is cut.
 - **`apple_set_os`**: only needed on MacBookPro11,3 / 11,5.

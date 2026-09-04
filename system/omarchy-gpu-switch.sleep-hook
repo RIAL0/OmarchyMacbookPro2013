@@ -1,7 +1,8 @@
 #!/bin/bash
 # Resuming from hibernate goes through the firmware, which consumes
-# gpu-power-prefs and powers the dGPU back on. Re-apply the persisted choices
-# afterwards (no-op after a plain suspend: the variable still reads back and
-# apple_gmux restores the dGPU power state itself).
+# gpu-power-prefs and powers the dGPU back on. A plain suspend consumes the
+# variable too. Re-apply the persisted choices afterwards; the dGPU step is
+# a no-op after a plain suspend because apple_gmux cuts the rail again
+# itself on resume (vga_switcheroo still says Off, which is correct).
 [[ ${1:-} == post ]] || exit 0
 exec /usr/local/lib/omarchy-gpu-switch-apply
