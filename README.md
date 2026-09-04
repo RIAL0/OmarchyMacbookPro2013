@@ -38,6 +38,14 @@ working after one reboot. Details in [docs/how-it-works.md](docs/how-it-works.md
 | `omarchy-gpu-switch` | `~/.local/bin/` | Your command: status, switch, dGPU power. |
 | `rial.gpu-status` | `~/.config/omarchy/plugins/` | Bar widget: `iGPU` / `dGPU`, highlighted when a switch is pending. |
 
+The widget in the top bar, and what its tooltip shows on hover:
+
+<p>
+  <img src="docs/img/bar-widget.png" alt="Bar showing the iGPU indicator" height="28">
+  <br>
+  <img src="docs/img/bar-widget-tooltip.png" alt="Tooltip: Display on Integrated, NVIDIA powered off, next boot Integrated" width="380">
+</p>
+
 ## Install, step by step
 
 1. Install Omarchy normally. The stock kernel already has everything needed (`i915`, `nouveau`,
