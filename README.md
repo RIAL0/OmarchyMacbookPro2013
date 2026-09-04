@@ -32,7 +32,7 @@ working after one reboot. Details in [docs/how-it-works.md](docs/how-it-works.md
 |---|---|---|
 | `omarchy-gpu-switch-apply` | `/usr/local/lib/` | Root helper. Writes `gpu-power-prefs` for the next boot and powers the idle dGPU off through gmux. |
 | `omarchy-gpu-switch-persist.service` | `/etc/systemd/system/` | Runs the helper on every boot, before the display manager. |
-| sleep hook | `/usr/lib/systemd/system-sleep/` | Runs the helper again after hibernate resume. |
+| sleep hook | `/usr/lib/systemd/system-sleep/` | Runs the helper again after suspend or hibernate resume (both consume the NVRAM variable). |
 | `/etc/omarchy-gpu-mode` | | `integrated` or `dedicated`. The source of truth for the next boot. |
 | `/etc/omarchy-gpu-dgpu-power` | | `auto` (power the NVIDIA card off when idle) or `on`. |
 | `omarchy-gpu-switch` | `~/.local/bin/` | Your command: status, switch, dGPU power. |
