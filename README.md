@@ -46,6 +46,11 @@ The widget in the top bar, and what its tooltip shows on hover:
   <img src="docs/img/bar-widget-tooltip.png" alt="Tooltip: Display on Integrated, NVIDIA powered off, next boot Integrated" width="380">
 </p>
 
+Just want the widget on its own, on top of a GPU-switching setup you already have?
+It's also published standalone at
+[RIAL0/omarchy-gpu-status](https://github.com/RIAL0/omarchy-gpu-status), installable with
+`omarchy plugin add`.
+
 ## Quick install
 
 On a fresh Omarchy install, one command clones the repo and runs the installer:
